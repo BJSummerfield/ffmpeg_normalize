@@ -75,6 +75,11 @@ fn setup_cli() -> clap::ArgMatches {
                 .ignore_case(true)
                 .default_value("-2.0")
                 .help("Maximum true peak."),
+            Arg::new("down_mix")
+                .short('d')
+                .long("down_mix")
+                .action(ArgAction::SetTrue)
+                .help("Downmix to 16bit 48khz stereo."),
             Arg::new("resample")
                 .short('r')
                 .long("resample")
@@ -89,7 +94,12 @@ fn main() {
 
     let input_path = matches.get_one::<String>("input").unwrap();
     let settings = format!(
-        "loudnorm=I={}:LRA={}:tp={}:print_format=json",
+        "{}loudnorm=I={}:LRA={}:tp={}:print_format=json",
+        if *matches.get_one("down_mix").unwrap() {
+            "aformat=sample_fmts=s16:sample_rates=48000:channel_layouts=stereo,"
+        } else {
+            ""
+        },
         matches
             .get_one::<String>("integrated_loudness")
             .unwrap()
@@ -114,7 +124,12 @@ fn main() {
         Ok(json_output) => {
             let loudness: Loudness = serde_json::from_str(&json_output).unwrap();
             let af = format!(
-                "-af loudnorm=linear=true:I={}:LRA={}:TP={}:measured_I={}:measured_TP={}:measured_LRA={}:measured_thresh={}:offset={}{}",
+                "{}loudnorm=linear=true:I={}:LRA={}:TP={}:measured_I={}:measured_TP={}:measured_LRA={}:measured_thresh={}:offset={}:print_format=json{}",
+                if *matches.get_one("down_mix").unwrap() {
+                    "aformat=sample_fmts=s16:sample_rates=48000:channel_layouts=stereo,"
+                } else {
+                    ""
+                },
                 matches.get_one::<String>("integrated_loudness").unwrap(),
                 matches.get_one::<String>("loudness_range").unwrap(),
                 matches.get_one::<String>("true_peak").unwrap(),
