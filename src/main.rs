@@ -1,4 +1,4 @@
-use clap::{builder::Command, Arg, ArgAction};
+use clap::{builder::Command, Arg, ArgAction, ArgMatches};
 use serde::{Deserialize, Serialize};
 use std::{
     error::Error,
@@ -12,6 +12,41 @@ struct Loudness {
     input_lra: String,
     input_thresh: String,
     target_offset: String,
+}
+
+#[derive(Debug)]
+struct CliConfig {
+    input_path: String,
+    integrated_loudness: String,
+    loudness_range: String,
+    true_peak: String,
+    down_mix: bool,
+    resample: bool,
+}
+
+impl CliConfig {
+    fn new(matches: &ArgMatches) -> Result<Self, &'static str> {
+        Ok(Self {
+            input_path: matches
+                .get_one::<String>("input")
+                .ok_or("Missing input path")?
+                .clone(),
+            integrated_loudness: matches
+                .get_one::<String>("integrated_loudness")
+                .ok_or("Missing integrated loudness target")?
+                .clone(),
+            loudness_range: matches
+                .get_one::<String>("loudness_range")
+                .ok_or("Missing loudness range target")?
+                .clone(),
+            true_peak: matches
+                .get_one::<String>("true_peak")
+                .ok_or("Missing true peak")?
+                .clone(),
+            down_mix: matches.get_flag("down_mix"),
+            resample: matches.get_flag("resample"),
+        })
+    }
 }
 
 fn analyze_loudness(input_path: &str, filter_settings: &str) -> Result<String, Box<dyn Error>> {
@@ -33,114 +68,102 @@ fn analyze_loudness(input_path: &str, filter_settings: &str) -> Result<String, B
     let output = process.wait_with_output()?;
 
     if output.status.success() {
-        let output_s = String::from_utf8_lossy(&output.stderr);
-        Ok(extract_json(&output_s))
+        Ok(String::from_utf8_lossy(&output.stderr).to_string())
     } else {
         Err(Box::new(std::io::Error::new(
             std::io::ErrorKind::Other,
-            String::from_utf8_lossy(&output.stderr).to_string(),
+            "Failed to process the audio file.",
         )))
     }
 }
 
+/// Extracts the JSON part from the ffmpeg output.
 fn extract_json(output: &str) -> String {
-    let lines: Vec<&str> = output.lines().collect();
-    let (_, json_lines) = lines.split_at(lines.len() - 12);
-    json_lines.join("\n")
+    if let Some(start) = output.rfind('{') {
+        let json_part = &output[start..];
+        json_part.to_string()
+    } else {
+        String::new()
+    }
 }
 
 fn setup_cli() -> clap::ArgMatches {
     Command::new("ffmpeg-loudnorm-helper")
+        .about("Helps normalize loudness of audio files.")
         .arg(
             Arg::new("input")
                 .help("Path to the input file.")
                 .required(true),
         )
         .args(&[
-            Arg::new("integrated_loudness")
-                .short('i')
-                .long("integrated_loudness")
-                .ignore_case(true)
-                .default_value("-24.0")
-                .help("Integrated loudness target."),
-            Arg::new("loudness_range")
-                .short('l')
-                .long("loudness_range")
-                .ignore_case(true)
-                .default_value("7.0")
-                .help("Loudness range target."),
-            Arg::new("true_peak")
-                .short('t')
-                .long("true_peak")
-                .ignore_case(true)
-                .default_value("-2.0")
-                .help("Maximum true peak."),
-            Arg::new("down_mix")
-                .short('d')
-                .long("down_mix")
-                .action(ArgAction::SetTrue)
-                .help("Downmix to 16bit 48khz stereo."),
-            Arg::new("resample")
-                .short('r')
-                .long("resample")
-                .action(ArgAction::SetTrue)
-                .help("Add a resampling filter hardcoded to 48kHz after loudnorm."),
+            setup_arg(
+                "integrated_loudness",
+                'i',
+                "-24.0",
+                "Integrated loudness target.",
+            ),
+            setup_arg("loudness_range", 'l', "7.0", "Loudness range target."),
+            setup_arg("true_peak", 't', "-2.0", "Maximum true peak."),
+            setup_flag("down_mix", 'd', "Downmix to 16bit 48khz stereo."),
+            setup_flag(
+                "resample",
+                'r',
+                "Add a resampling filter hardcoded to 48kHz after loudnorm.",
+            ),
         ])
         .get_matches()
 }
 
-fn main() {
-    let matches = setup_cli();
+fn setup_flag(name: &'static str, short: char, help: &'static str) -> Arg {
+    Arg::new(name)
+        .short(short)
+        .long(name)
+        .action(ArgAction::SetTrue)
+        .help(help)
+}
 
-    let input_path = matches.get_one::<String>("input").unwrap();
-    let settings = format!(
+fn setup_arg(name: &'static str, short: char, default: &'static str, help: &'static str) -> Arg {
+    Arg::new(name)
+        .short(short)
+        .long(name)
+        .default_value(default)
+        .help(help)
+}
+
+fn construct_filter_settings(config: &CliConfig) -> String {
+    format!(
         "{}loudnorm=I={}:LRA={}:tp={}:print_format=json",
-        if *matches.get_one("down_mix").unwrap() {
+        if config.down_mix {
             "aformat=sample_fmts=s16:sample_rates=48000:channel_layouts=stereo,"
         } else {
             ""
         },
-        matches
-            .get_one::<String>("integrated_loudness")
-            .unwrap()
-            .parse::<f32>()
-            .unwrap()
-            .clamp(-70.0, -5.0),
-        matches
-            .get_one::<String>("loudness_range")
-            .unwrap()
-            .parse::<f32>()
-            .unwrap()
-            .clamp(1.0, 20.0),
-        matches
-            .get_one::<String>("true_peak")
-            .unwrap()
-            .parse::<f32>()
-            .unwrap()
-            .clamp(-9.0, 0.0),
-    );
+        config.integrated_loudness,
+        config.loudness_range,
+        config.true_peak,
+    )
+}
 
-    match analyze_loudness(input_path, &settings) {
-        Ok(json_output) => {
-            let loudness: Loudness = serde_json::from_str(&json_output).unwrap();
-            let af = format!(
-                "{}loudnorm=linear=true:I={}:LRA={}:TP={}:measured_I={}:measured_TP={}:measured_LRA={}:measured_thresh={}:offset={}:print_format=json{}",
-                if *matches.get_one("down_mix").unwrap() {
-                    "aformat=sample_fmts=s16:sample_rates=48000:channel_layouts=stereo,"
-                } else {
-                    ""
-                },
-                matches.get_one::<String>("integrated_loudness").unwrap(),
-                matches.get_one::<String>("loudness_range").unwrap(),
-                matches.get_one::<String>("true_peak").unwrap(),
-                loudness.input_i, loudness.input_tp, loudness.input_lra, loudness.input_thresh, loudness.target_offset,
-                if matches.get_flag("resample") {
-                    ",aresample=osr=48000,aresample=resampler=soxr:precision=28"
-                } else {
-                    ""
-                }
-            );
-            println!("{}", af);
+fn construct_audio_filter_chain(config: &CliConfig, loudness: &Loudness) -> String {
+    format!(
+        "{}loudnorm=linear=true:I={}:LRA={}:TP={}:measured_I={}:measured_TP={}:measured_LRA={}:measured_thresh={}:offset={}{}",
+        if config.down_mix { "aformat=sample_fmts=s16:sample_rates=48000:channel_layouts=stereo," } else { "" },
+        config.integrated_loudness,
+        config.loudness_range,
+        config.true_peak,
+        loudness.input_i, loudness.input_tp, loudness.input_lra, loudness.input_thresh, loudness.target_offset,
+        if config.resample { ",aresample=osr=48000,aresample=resampler=soxr:precision=28" } else { "" }
+    )
+}
+
+fn main() {
+    let matches = setup_cli();
+    let config = CliConfig::new(&matches).expect("Error parsing command line arguments");
+
+    match analyze_loudness(&config.input_path, &construct_filter_settings(&config)) {
+        Ok(output) => {
+            let loudness: Loudness = serde_json::from_str(&extract_json(&output)).unwrap();
+            println!("{}", construct_audio_filter_chain(&config, &loudness));
         }
         Err(e) => eprintln!("Error processing file: {}", e),
     }
