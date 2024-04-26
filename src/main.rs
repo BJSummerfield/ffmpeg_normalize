@@ -1,7 +1,11 @@
 use clap::{builder::Command, Arg, ArgAction, ArgMatches};
+use core::time::Duration;
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::process::{Command as ProcessCommand, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Loudness {
@@ -18,6 +22,27 @@ struct CliConfig {
     loudness_range: String,
     true_peak: String,
     down_mix: bool,
+}
+
+struct ProgressSpinner;
+
+impl ProgressSpinner {
+    fn show_progress() -> (Arc<AtomicBool>, thread::JoinHandle<()>) {
+        const PROGRESS_CHARS: [&str; 12] =
+            ["⠂", "⠃", "⠁", "⠉", "⠈", "⠘", "⠐", "⠰", "⠠", "⠤", "⠄", "⠆"];
+        let finished = Arc::new(AtomicBool::new(false));
+        let stop_signal = Arc::clone(&finished);
+        let handle = thread::spawn(move || {
+            for pc in PROGRESS_CHARS.iter().cycle() {
+                if stop_signal.load(Ordering::Relaxed) {
+                    break;
+                };
+                eprint!("Processing 1st Loudnorm Pass {}\r", pc);
+                thread::sleep(Duration::from_millis(250));
+            }
+        });
+        (finished, handle)
+    }
 }
 
 impl CliConfig {
@@ -84,13 +109,24 @@ impl LoudnessAnalyzer {
         let filter_settings = FilterSettings::construct(config, None);
         let output = Self::analyze_loudness(&config.input_path, &filter_settings)?;
 
-        let loudness: Loudness = serde_json::from_str(&Self::extract_json(&output)).unwrap();
-        println!("{}", FilterSettings::construct(config, Some(&loudness)));
-
-        Ok(())
+        match serde_json::from_str::<Loudness>(&Self::extract_json(&output)) {
+            Ok(loudness) => {
+                println!("{}", FilterSettings::construct(config, Some(&loudness)));
+                Ok(())
+            }
+            Err(e) => {
+                eprintln!("Failed to parse JSON: {}", e);
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Invalid JSON data",
+                ))
+            }
+        }
     }
 
     fn analyze_loudness(input_path: &str, filter_settings: &str) -> io::Result<String> {
+        let (finished, spinner_handle) = ProgressSpinner::show_progress();
+
         let process = ProcessCommand::new("ffmpeg")
             .args(&[
                 "-i",
@@ -104,11 +140,19 @@ impl LoudnessAnalyzer {
                 "-",
             ])
             .stderr(Stdio::piped())
-            .spawn()?
-            .wait_with_output()?;
+            .spawn()?;
 
-        if process.status.success() {
-            Ok(String::from_utf8_lossy(&process.stderr).to_string())
+        let output = process.wait_with_output()?;
+
+        finished.store(true, Ordering::Relaxed);
+
+        if let Err(e) = spinner_handle.join() {
+            eprintln!("Error stopping the spinner: {:?}", e);
+        }
+
+        // Check if FFmpeg was successful
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stderr).to_string())
         } else {
             Err(io::Error::new(
                 io::ErrorKind::Other,
@@ -118,10 +162,10 @@ impl LoudnessAnalyzer {
     }
 
     fn extract_json(output: &str) -> String {
-        output
-            .rfind('{')
-            .map(|start| output[start..].to_string())
-            .unwrap_or_default()
+        let json_start = output.rfind('{').unwrap_or(0);
+        let json_end = output[json_start..].find('}').unwrap_or(output.len() - 1) + json_start + 1;
+        let json = &output[json_start..json_end];
+        json.to_string()
     }
 }
 
