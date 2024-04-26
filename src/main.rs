@@ -49,7 +49,7 @@ impl CliConfig {
                 Arg::new("integrated_loudness")
                     .short('i')
                     .long("integrated_loudness")
-                    .default_value("-24.0")
+                    .default_value("-23.0")
                     .help("Integrated loudness target."),
             )
             .arg(
