@@ -58,7 +58,7 @@ impl CliConfig {
                     .short('i')
                     .long("integrated_loudness")
                     .default_value("-23.0")
-                    .help("Integrated loudness target."),
+                    .help("Integrated loudness target"),
             )
             .arg(
                 Arg::new("loudness_range")
@@ -103,7 +103,7 @@ impl LoudnessAnalyzer {
     }
 
     fn analyze_loudness(input_path: &str, filter_settings: &str) -> io::Result<String> {
-        let spinner = ProgressSpinner::show_progress();
+        let spinner = ProgressSpinner::start();
 
         let process = ProcessCommand::new("ffmpeg")
             .args(&[
@@ -121,7 +121,7 @@ impl LoudnessAnalyzer {
             .spawn()?;
 
         let output = process.wait_with_output()?;
-        spinner.store(false, Ordering::SeqCst);
+        spinner.stop();
 
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stderr).to_string())
@@ -166,10 +166,12 @@ impl FilterSettings {
     }
 }
 
-struct ProgressSpinner;
+struct ProgressSpinner {
+    finished: Arc<AtomicBool>,
+}
 
 impl ProgressSpinner {
-    fn show_progress() -> Arc<AtomicBool> {
+    fn start() -> Self {
         const PROGRESS_CHARS: [&str; 12] =
             ["⠂", "⠃", "⠁", "⠉", "⠈", "⠘", "⠐", "⠰", "⠠", "⠤", "⠄", "⠆"];
         let finished = Arc::new(AtomicBool::new(false));
@@ -177,7 +179,7 @@ impl ProgressSpinner {
             let stop_signal = Arc::clone(&finished);
             let _ = thread::spawn(move || {
                 for pc in PROGRESS_CHARS.iter().cycle() {
-                    if stop_signal.load(Ordering::Relaxed) {
+                    if stop_signal.load(Ordering::Acquire) {
                         break;
                     };
                     eprint!("Processing {}\r", pc);
@@ -185,7 +187,11 @@ impl ProgressSpinner {
                 }
             });
         }
-        finished
+        Self { finished }
+    }
+
+    fn stop(&self) {
+        self.finished.store(false, Ordering::Release);
     }
 }
 
